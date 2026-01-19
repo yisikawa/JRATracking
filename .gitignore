@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Database
+*.db
+
+# Stan / CmdStanPy
+analysis/*.hpp
+analysis/*.exe
+analysis/*.o
+analysis/*.d
+stan/
+
+# VS Code
+.vscode/
+
+# Artifacts & Exports
+*.csv
+*.png
+*.webp
