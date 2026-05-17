@@ -6,126 +6,361 @@ st.title("JRA 競馬予測 (Bayesian Inference)")
 st.write("左側のサイドバーから機能を選択してください。")
 
 st.sidebar.title("メニュー")
-option = st.sidebar.selectbox("機能", ["ダッシュボード", "データ収集", "分析・予測", "データベース管理"])
+option = st.sidebar.selectbox("機能", ["ダッシュボード", "データ収集", "分析・予測", "今日のレース予測", "データベース管理"])
 
 if option == "ダッシュボード":
     st.header("開催予定のレース")
     st.info("データがありません。データ収集を実行してください。")
 
 elif option == "データ収集":
-    st.header("データスクレイピング")
-    st.write("JRA公式サイトからデータを取得します。")
-    
-    url = st.text_input("レース結果URLを入力してください", "https://www.jra.go.jp/JRADB/accessS.html?CNAME=pw01sde1006202601060120260117/85")
-    
-    if st.button("データ取得開始"):
-        from data.scraper import JRAScraper
-        from data.database import init_db
-        
-        session = init_db()
-        scraper = JRAScraper(session)
-        
-        with st.spinner("スクレイピング中..."):
-            data = scraper.scrape_race_results(url)
-            if data:
-                st.success(f"データ取得成功: {data['race'].name}")
-                st.write(f"エントリー数: {len(data['entries'])}")
-                st.dataframe([{'Rank': r.rank, 'Horse': e.horse_id, 'Jockey': e.jockey} 
-                              for r, e in zip(data['results'], data['entries'])])
-                scraper.save_to_db(data)
-                st.info("データがデータベースに保存されました。")
+    st.header("データスクレイピング (netkeiba.com)")
+    st.write("netkeibaからレース結果を取得します。")
+
+    tab_date, tab_id = st.tabs(["日付指定", "レースID / URL指定"])
+
+    with tab_date:
+        st.write("指定した日のレース一覧を取得し、全結果をまとめて保存します。")
+        target_date = st.date_input("開催日を選択", value=None)
+
+        if st.button("一覧取得 → 全レース保存", key="btn_date"):
+            if target_date is None:
+                st.warning("日付を選択してください。")
             else:
-                st.error("データ取得に失敗しました。URLを確認するか、ページ構造が変わっている可能性があります。")
+                from data.scraper import JRAScraper
+                from data.database import init_db
+                session = init_db()
+                scraper = JRAScraper(session)
+
+                with st.spinner("レースID一覧を取得中..."):
+                    race_ids = scraper.get_race_ids_by_date(target_date)
+
+                if not race_ids:
+                    st.error(
+                        "指定日のレースが見つかりませんでした。\n\n"
+                        "**考えられる原因:**\n"
+                        "- レースが現在進行中 → 結果はレース終了後にnetkeibaへ反映されます\n"
+                        "- JRA非開催日 (平日・休止日など)\n"
+                        "- 過去の確定済みレースを選んでください（例: 先週の土日）"
+                    )
+                else:
+                    st.info(f"{len(race_ids)} レースを取得します: {race_ids}")
+                    progress = st.progress(0)
+                    saved, failed = 0, 0
+                    for i, race_id in enumerate(race_ids):
+                        with st.spinner(f"[{i+1}/{len(race_ids)}] {race_id} を取得中..."):
+                            data = scraper.scrape_race_results(race_id)
+                            if data:
+                                scraper.save_to_db(data)
+                                saved += 1
+                            else:
+                                failed += 1
+                        progress.progress((i + 1) / len(race_ids))
+                    st.success(f"完了: {saved} レース保存 / {failed} 件失敗")
+
+    with tab_id:
+        st.write("12桁のレースIDまたは netkeiba の URL を直接入力します。")
+        st.caption("例: `202601060112`　または　`https://db.netkeiba.com/race/202601060112/`")
+        race_input = st.text_input("レースID または URL", "202601060112")
+
+        if st.button("データ取得", key="btn_id"):
+            from data.scraper import JRAScraper
+            from data.database import init_db
+            session = init_db()
+            scraper = JRAScraper(session)
+
+            with st.spinner("スクレイピング中..."):
+                data = scraper.scrape_race_results(race_input)
+                if data:
+                    st.success(f"取得成功: {data['race'].name}  ({data['race'].location} / {data['race'].course_type}{data['race'].distance}m)")
+                    st.dataframe(
+                        [{'着順': r.rank, '馬名': e.horse_id, '騎手': e.jockey,
+                          'タイム(秒)': r.time_seconds, '単勝': r.odds}
+                         for r, e in zip(data['results'], data['entries'])]
+                    )
+                    scraper.save_to_db(data)
+                    st.info("データをデータベースに保存しました。")
+                else:
+                    st.error("データ取得に失敗しました。レースIDを確認してください（12桁の数字）。")
 
 elif option == "分析・予測":
     st.header("ベイズ推定モデル")
     st.write("Stanモデルを用いて予測を行います。")
-    
-    from data.database import init_db, Result, Entry, Horse
+
+    from data.database import init_db, Result, Entry
+    from analysis.predictor import JRAPredictor
     import pandas as pd
-    
+
+    # モデルをセッション間で保持（ページ再描画のたびに再学習しない）
+    if 'predictor' not in st.session_state:
+        st.session_state.predictor = None
+        st.session_state.predictor_summary = None
+
     if st.button("モデル学習 (データ更新)"):
-        with st.spinner("学習中..."):
+        with st.spinner("データ取得・学習中..."):
             session = init_db()
-            # データを取得してDataFrame化
             results = session.query(Result).all()
             if not results:
                 st.warning("学習用データがありません。「データ収集」を行ってください。")
             else:
                 data = []
                 for r in results:
-                    # 馬名や騎手名も取得する必要があるが、ResultにはIDしかないのでJoinが必要
-                    # 簡易的にResultのIDだけで進めるか、Joinクエリを書く
-                    # EntryからJockey情報を取るのが一意
-                     entry = session.query(Entry).filter_by(race_id=r.race_id, horse_id=r.horse_id).first()
-                     if entry:
-                         # Get horse name
-                         horse_name = entry.horse.name if entry.horse else r.horse_id
-                         
-                         data.append({
-                             'rank': r.rank,
-                             'jockey': entry.jockey,
-                             'horse_id': horse_name
-                         })
-                
+                    entry = session.query(Entry).filter_by(
+                        race_id=r.race_id, horse_id=r.horse_id
+                    ).first()
+                    if entry:
+                        horse_name = entry.horse.name if entry.horse else r.horse_id
+                        data.append({
+                            'rank':     r.rank,
+                            'jockey':   entry.jockey,
+                            'horse_id': horse_name,
+                        })
+
                 if not data:
                     st.error("有効な学習データが抽出できませんでした。")
                 else:
                     df = pd.DataFrame(data)
-                    
-                    from analysis.predictor import JRAPredictor
                     predictor = JRAPredictor()
                     summary = predictor.train(df)
-                    
-                    st.success("学習完了")
-                    
-                    # --- 騎手ランキング ---
-                    st.subheader("騎手能力ランキング (beta_j)")
-                    st.write("数値が大きいほど、このモデルが「強い（勝率が高い）」と評価している騎手です。")
-                    
-                    id_to_jockey_name = {v: k for k, v in predictor.jockey_map.items()}
-                    beta_j_rows = []
-                    for i in range(1, len(id_to_jockey_name) + 1):
-                        param_name = f'beta_j[{i}]'
-                        if param_name in summary.index:
-                            row = summary.loc[param_name]
-                            beta_j_rows.append({
-                                'Jockey': id_to_jockey_name[i],
-                                'Ability': row['Mean'],
-                                'Uncertainty': row['StdDev'],
-                                'Lower 5%': row['5%'],
-                                'Upper 95%': row['95%'],
-                                'R_hat': row['R_hat']
-                            })
-                    
-                    if beta_j_rows:
-                        jockey_df = pd.DataFrame(beta_j_rows).set_index('Jockey').sort_values('Ability', ascending=False)
-                        st.dataframe(jockey_df, use_container_width=True)
+                    st.session_state.predictor = predictor
+                    st.session_state.predictor_summary = summary
+                    st.success(
+                        f"学習完了 — 騎手 {len(predictor.known_jockeys())} 名 / "
+                        f"馬 {len(predictor.known_horses())} 頭"
+                    )
 
-                    # --- 馬ランキング ---
-                    st.subheader("馬能力ランキング (beta_h)")
-                    st.write("数値が大きいほど、このモデルが「強い」と評価している馬です。")
-                    
-                    id_to_horse_name = {v: k for k, v in predictor.horse_map.items()}
-                    beta_h_rows = []
-                    for i in range(1, len(id_to_horse_name) + 1):
-                        param_name = f'beta_h[{i}]'
-                        if param_name in summary.index:
-                            row = summary.loc[param_name]
-                            beta_h_rows.append({
-                                'Horse': id_to_horse_name[i],
-                                'Ability': row['Mean'],
-                                'Uncertainty': row['StdDev'],
-                                'Lower 5%': row['5%'],
-                                'Upper 95%': row['95%'],
-                                'R_hat': row['R_hat']
-                            })
-                            
-                    if beta_h_rows:
-                        horse_df = pd.DataFrame(beta_h_rows).set_index('Horse').sort_values('Ability', ascending=False)
-                        st.dataframe(horse_df, use_container_width=True)
-                    else:
-                        st.write("馬データの表示に失敗しました。")
+    if st.session_state.predictor is not None:
+        predictor: JRAPredictor = st.session_state.predictor
+        summary: pd.DataFrame   = st.session_state.predictor_summary
+
+        tab_rank, tab_predict = st.tabs(["能力ランキング", "勝率予測"])
+
+        with tab_rank:
+            # --- 騎手ランキング ---
+            st.subheader("騎手能力ランキング (beta_j)")
+            st.write("数値が大きいほど「強い（勝率が高い）」と評価している騎手です。")
+
+            id_to_jockey = {v: k for k, v in predictor.jockey_map.items()
+                            if k != predictor.UNKNOWN}
+            beta_j_rows = []
+            for i, name in id_to_jockey.items():
+                param = f'beta_j[{i}]'
+                if param in summary.index:
+                    row = summary.loc[param]
+                    beta_j_rows.append({
+                        '騎手':    name,
+                        '能力値':  round(row['Mean'], 3),
+                        '標準偏差': round(row['StdDev'], 3),
+                        '5%':     round(row['5%'], 3),
+                        '95%':    round(row['95%'], 3),
+                        'R_hat':  round(row['R_hat'], 3),
+                    })
+            if beta_j_rows:
+                jdf = pd.DataFrame(beta_j_rows).set_index('騎手').sort_values('能力値', ascending=False)
+                st.dataframe(jdf, use_container_width=True)
+
+            st.divider()
+
+            # --- 馬ランキング ---
+            st.subheader("馬能力ランキング (beta_h)")
+            st.write("数値が大きいほど「強い」と評価している馬です。")
+
+            id_to_horse = {v: k for k, v in predictor.horse_map.items()
+                           if k != predictor.UNKNOWN}
+            beta_h_rows = []
+            for i, name in id_to_horse.items():
+                param = f'beta_h[{i}]'
+                if param in summary.index:
+                    row = summary.loc[param]
+                    beta_h_rows.append({
+                        '馬名':    name,
+                        '能力値':  round(row['Mean'], 3),
+                        '標準偏差': round(row['StdDev'], 3),
+                        '5%':     round(row['5%'], 3),
+                        '95%':    round(row['95%'], 3),
+                        'R_hat':  round(row['R_hat'], 3),
+                    })
+            if beta_h_rows:
+                hdf = pd.DataFrame(beta_h_rows).set_index('馬名').sort_values('能力値', ascending=False)
+                st.dataframe(hdf, use_container_width=True)
+            else:
+                st.info("馬データがありません。")
+
+        with tab_predict:
+            st.subheader("出走馬入力 → 勝率予測")
+            known_jockeys = set(predictor.known_jockeys())
+            known_horses  = set(predictor.known_horses())
+            st.caption(
+                f"学習済み: 騎手 {len(known_jockeys)} 名 / 馬 {len(known_horses)} 頭。"
+                " 未知の名前は平均能力(事前分布の平均)として計算されます。"
+            )
+
+            default_df = pd.DataFrame({'騎手': [''] * 6, '馬名': [''] * 6})
+            entry_df = st.data_editor(
+                default_df,
+                num_rows="dynamic",
+                use_container_width=True,
+                column_config={
+                    '騎手': st.column_config.TextColumn("騎手名", width="medium"),
+                    '馬名': st.column_config.TextColumn("馬名",   width="medium"),
+                },
+            )
+
+            if st.button("予測実行"):
+                valid_entries = [
+                    {'jockey': row['騎手'].strip(), 'horse': row['馬名'].strip()}
+                    for _, row in entry_df.iterrows()
+                    if row['騎手'].strip() and row['馬名'].strip()
+                ]
+                if not valid_entries:
+                    st.warning("騎手名と馬名を入力してください。")
+                else:
+                    with st.spinner("予測計算中..."):
+                        prob_win, prob_top3 = predictor.predict(valid_entries)
+
+                    rows = []
+                    for e, pw, pt in zip(valid_entries, prob_win, prob_top3):
+                        j_ok = e['jockey'] in known_jockeys
+                        h_ok = e['horse']  in known_horses
+                        if j_ok and h_ok:
+                            status = '✓ 既知'
+                        elif not j_ok and not h_ok:
+                            status = '⚠ 両方不明'
+                        elif not j_ok:
+                            status = '⚠ 騎手不明'
+                        else:
+                            status = '⚠ 馬不明'
+                        rows.append({
+                            '騎手':        e['jockey'],
+                            '馬名':        e['horse'],
+                            'データ確認':  status,
+                            '勝率 (%)':    round(float(pw) * 100, 1),
+                            '3着内率 (%)': round(float(pt) * 100, 1),
+                        })
+
+                    result_df = (
+                        pd.DataFrame(rows)
+                        .sort_values('勝率 (%)', ascending=False)
+                        .reset_index(drop=True)
+                    )
+                    st.dataframe(result_df, use_container_width=True)
+    else:
+        st.info("「モデル学習」ボタンを押して学習を開始してください。")
+
+elif option == "今日のレース予測":
+    st.header("今日のレース予測")
+    st.write("当日の出馬表を自動取得し、学習済みモデルで勝率を予測します。")
+
+    from data.scraper import JRAScraper, PLACE_CODES
+    from data.database import init_db
+    import pandas as pd
+    from datetime import date as dt_date
+
+    if st.session_state.get('predictor') is None:
+        st.warning("先に「分析・予測」→「モデル学習 (データ更新)」を実行してください。")
+        st.stop()
+
+    predictor = st.session_state.predictor
+
+    if 'upcoming_race_ids' not in st.session_state:
+        st.session_state.upcoming_race_ids = []
+    if 'shutuba_cache' not in st.session_state:
+        st.session_state.shutuba_cache = {}
+
+    fetch_date = st.date_input("開催日", value=dt_date.today())
+
+    if st.button("レース一覧を取得"):
+        session = init_db()
+        scraper = JRAScraper(session)
+        with st.spinner("レースID取得中..."):
+            race_ids = scraper.get_upcoming_race_ids(fetch_date)
+        st.session_state.upcoming_race_ids = race_ids
+        st.session_state.shutuba_cache = {}
+        if race_ids:
+            st.success(f"{len(race_ids)} レースを取得しました。")
+        else:
+            st.error("レースが見つかりません。開催がない日付か、取得に失敗しました。")
+
+    race_ids = st.session_state.upcoming_race_ids
+    if not race_ids:
+        st.info("「レース一覧を取得」ボタンを押してください。")
+        st.stop()
+
+    def race_label(rid):
+        venue = PLACE_CODES.get(rid[4:6], rid[4:6])
+        return f"{venue} {int(rid[10:12])}R  ({rid})"
+
+    race_options = {race_label(rid): rid for rid in race_ids}
+    selected_label = st.selectbox("レースを選択", list(race_options.keys()))
+    selected_id = race_options[selected_label]
+
+    if st.button("出馬表取得 → 予測実行"):
+        if selected_id not in st.session_state.shutuba_cache:
+            session = init_db()
+            scraper = JRAScraper(session)
+            with st.spinner("出馬表を取得中..."):
+                shutuba = scraper.scrape_shutuba(selected_id)
+            st.session_state.shutuba_cache[selected_id] = shutuba
+        else:
+            shutuba = st.session_state.shutuba_cache[selected_id]
+
+        if not shutuba or not shutuba.get('entries'):
+            st.error("出馬表の取得に失敗しました。レースIDを確認してください。")
+            st.stop()
+
+        entries = shutuba['entries']
+        loc      = shutuba.get('location', '')
+        ctype    = shutuba.get('course_type', '')
+        dist     = shutuba.get('distance', 0)
+        weather  = shutuba.get('weather', '')
+        rname    = shutuba.get('race_name', selected_id)
+
+        st.subheader(f"{rname}")
+        meta_parts = [loc, f"{ctype}{dist}m" if dist else "", weather]
+        st.caption("  /  ".join(p for p in meta_parts if p))
+
+        known_jockeys = set(predictor.known_jockeys())
+        known_horses  = set(predictor.known_horses())
+
+        pred_input = [{'jockey': e['jockey'], 'horse': e['horse_name']} for e in entries]
+
+        with st.spinner("予測計算中..."):
+            prob_win, prob_top3 = predictor.predict(pred_input)
+
+        rows = []
+        for e, pw, pt in zip(entries, prob_win, prob_top3):
+            j_ok = e['jockey']     in known_jockeys
+            h_ok = e['horse_name'] in known_horses
+            if   j_ok and h_ok:        status = '✓'
+            elif not j_ok and not h_ok: status = '⚠ 両方不明'
+            elif not j_ok:              status = '⚠ 騎手不明'
+            else:                       status = '⚠ 馬不明'
+
+            rows.append({
+                '枠':         e['bracket_number'],
+                '馬番':       e['horse_number'],
+                '馬名':       e['horse_name'],
+                '性齢':       f"{e['sex']}{e['age']}",
+                '斤量':       e['weight'],
+                '騎手':       e['jockey'],
+                '調教師':     e['trainer'],
+                'データ確認': status,
+                '勝率 (%)':   round(float(pw) * 100, 1),
+                '3着内率 (%)': round(float(pt) * 100, 1),
+            })
+
+        result_df = (
+            pd.DataFrame(rows)
+            .sort_values('勝率 (%)', ascending=False)
+            .reset_index(drop=True)
+        )
+        st.dataframe(result_df, use_container_width=True)
+
+        unknown_count = sum(1 for r in rows if '不明' in r['データ確認'])
+        if unknown_count:
+            st.caption(
+                f"⚠ {unknown_count} 頭の騎手または馬が学習データに含まれていません。"
+                " より多くのレースデータを収集してから再学習すると精度が上がります。"
+            )
 
 elif option == "データベース管理":
     st.header("データベース管理")
@@ -181,11 +416,10 @@ elif option == "データベース管理":
                 if st.button("選択したレースを削除", type="primary"):
                     race_id = race_options[selected_race_key]
                     try:
-                        # Manually delete dependencies if no cascade
-                        session.query(Result).filter(Result.race_id == race_id).delete()
-                        session.query(Entry).filter(Entry.race_id == race_id).delete()
-                        session.query(Race).filter(Race.id == race_id).delete()
-                        session.commit()
+                        race_obj = session.query(Race).get(race_id)
+                        if race_obj:
+                            session.delete(race_obj)  # cascade で Entry/Result も自動削除
+                            session.commit()
                         st.success(f"レース {selected_race_key} を削除しました。")
                         st.rerun()
                     except Exception as e:
