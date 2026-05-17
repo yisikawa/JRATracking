@@ -3,7 +3,21 @@ from bs4 import BeautifulSoup
 import time
 import re
 from datetime import datetime, date
-from .database import Race, Horse, Entry, Result
+from .database import Race, Horse, Entry, Result, Jockey
+
+_JOCKEY_SYMBOL_RE = re.compile(r'^[▲△☆◇★◎○✕×\s]+')
+
+
+def _normalize_jockey(name: str) -> str:
+    return _JOCKEY_SYMBOL_RE.sub('', name).strip()
+
+
+def _extract_jockey_id(link) -> str:
+    if not link:
+        return None
+    href = link.get('href', '')
+    m = re.search(r'/jockey/(?:result/recent/)?(\w+)/?', href)
+    return m.group(1) if m else None
 
 PLACE_CODES = {
     '01': '札幌', '02': '函館', '03': '福島', '04': '新潟', '05': '東京',
@@ -148,8 +162,10 @@ class JRAScraper:
             weight_text = cols[5].get_text(strip=True)
             weight = float(weight_text) if re.match(r'^\d+(\.\d+)?$', weight_text) else 0.0
 
-            # 騎手名 (col[6])
-            jockey_name = cols[6].get_text(strip=True)
+            # 騎手名・騎手ID (col[6])
+            jockey_link = cols[6].find('a')
+            jockey_name = _normalize_jockey(cols[6].get_text(strip=True))
+            jockey_id   = _extract_jockey_id(jockey_link)
 
             # 調教師 (col[7])
             trainer_name = cols[7].get_text(strip=True) if len(cols) > 7 else ""
@@ -163,6 +179,7 @@ class JRAScraper:
                 'age':            age,
                 'weight':         weight,
                 'jockey':         jockey_name,
+                'jockey_id':      jockey_id,
                 'trainer':        trainer_name,
             })
 
@@ -295,8 +312,9 @@ class JRAScraper:
                 weight_text = cols[5].get_text(strip=True)
                 weight = float(weight_text) if re.match(r'^\d+(\.\d+)?$', weight_text) else 0.0
 
-                jockey_link = cols[6].find('a')
-                jockey_name = cols[6].get_text(strip=True)
+                jockey_link  = cols[6].find('a')
+                jockey_name  = _normalize_jockey(cols[6].get_text(strip=True))
+                jockey_id_val = _extract_jockey_id(jockey_link)
 
                 time_seconds = self._parse_time(cols[7].get_text(strip=True))
 
@@ -323,6 +341,7 @@ class JRAScraper:
                     bracket_number=bracket_num,
                     horse_number=horse_num,
                     jockey=jockey_name,
+                    jockey_id=jockey_id_val,
                     trainer=trainer_name,
                     weight=weight
                 ))
@@ -360,6 +379,9 @@ class JRAScraper:
             self.session.merge(parsed_data['race'])
             for horse in parsed_data['horses']:
                 self.session.merge(horse)
+            for entry in parsed_data['entries']:
+                if entry.jockey_id:
+                    self.session.merge(Jockey(id=entry.jockey_id, name=entry.jockey))
             for entry in parsed_data['entries']:
                 existing = self.session.query(Entry).filter_by(
                     race_id=entry.race_id, horse_id=entry.horse_id

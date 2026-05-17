@@ -15,6 +15,7 @@ class JRAPredictor:
         self.fit_result = None
         self.jockey_map = {}
         self.horse_map = {}
+        self.jockey_display_map = {}  # jockey key (ID or name) → 表示用名前
 
     def compile_model(self):
         self.model = CmdStanModel(stan_file=self.model_path)
@@ -25,6 +26,8 @@ class JRAPredictor:
         """
         unique_jockeys = list(df['jockey'].unique()) + [self.UNKNOWN]
         self.jockey_map = {name: i + 1 for i, name in enumerate(unique_jockeys)}
+        if 'jockey_name' in df.columns:
+            self.jockey_display_map = dict(zip(df['jockey'], df['jockey_name']))
 
         unique_horses = list(df['horse_id'].unique()) + [self.UNKNOWN]
         self.horse_map = {name: i + 1 for i, name in enumerate(unique_horses)}

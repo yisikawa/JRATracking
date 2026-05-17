@@ -25,7 +25,7 @@ class Horse(Base):
 
     id = Column(String, primary_key=True)
     name = Column(String)
-    sex = Column(String)   # 牡 / 牝 / セ
+    sex = Column(String)
     age = Column(Integer)
     sire = Column(String)
     dam = Column(String)
@@ -34,12 +34,22 @@ class Horse(Base):
     results = relationship("Result", back_populates="horse")
 
 
+class Jockey(Base):
+    __tablename__ = 'jockeys'
+
+    id = Column(String, primary_key=True)   # netkeiba 騎手コード
+    name = Column(String, nullable=False)
+
+    entries = relationship('Entry', back_populates='jockey_obj')
+
+
 class Entry(Base):
     __tablename__ = 'entries'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     race_id = Column(String, ForeignKey('races.id'))
     horse_id = Column(String, ForeignKey('horses.id'))
+    jockey_id = Column(String, ForeignKey('jockeys.id'), nullable=True)
 
     bracket_number = Column(Integer)
     horse_number = Column(Integer)
@@ -49,6 +59,7 @@ class Entry(Base):
 
     race = relationship("Race", back_populates="entries")
     horse = relationship("Horse", back_populates="entries")
+    jockey_obj = relationship('Jockey', back_populates='entries')
 
     __table_args__ = (UniqueConstraint('race_id', 'horse_id', name='_race_horse_uc'),)
 
@@ -76,11 +87,17 @@ def init_db(db_path='sqlite:///jra_data.db'):
 
 
 def _migrate(engine):
-    """既存DBに新規カラムを追加するマイグレーション"""
+    """既存DBに新規カラム・テーブルを追加するマイグレーション"""
     inspector = sa_inspect(engine)
-    horse_cols = {c['name'] for c in inspector.get_columns('horses')}
+
     with engine.connect() as conn:
-        for col, col_type in [('sex', 'VARCHAR'), ('age', 'INTEGER')]:
+        horse_cols = {c['name'] for c in inspector.get_columns('horses')}
+        for col, col_type in [('sex', 'VARCHAR'), ('age', 'INTEGER'), ('sire', 'VARCHAR'), ('dam', 'VARCHAR')]:
             if col not in horse_cols:
                 conn.execute(text(f'ALTER TABLE horses ADD COLUMN {col} {col_type}'))
                 conn.commit()
+
+        entry_cols = {c['name'] for c in inspector.get_columns('entries')}
+        if 'jockey_id' not in entry_cols:
+            conn.execute(text('ALTER TABLE entries ADD COLUMN jockey_id VARCHAR'))
+            conn.commit()

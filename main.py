@@ -16,7 +16,7 @@ elif option == "データ収集":
     st.header("データスクレイピング (netkeiba.com)")
     st.write("netkeibaからレース結果を取得します。")
 
-    tab_date, tab_id = st.tabs(["日付指定", "レースID / URL指定"])
+    tab_date, tab_id, tab_bulk = st.tabs(["日付指定", "レースID / URL指定", "一括収集"])
 
     with tab_date:
         st.write("指定した日のレース一覧を取得し、全結果をまとめて保存します。")
@@ -82,6 +82,69 @@ elif option == "データ収集":
                 else:
                     st.error("データ取得に失敗しました。レースIDを確認してください（12桁の数字）。")
 
+    with tab_bulk:
+        st.write("指定した期間の土日レース結果を自動一括取得します。")
+
+        from datetime import date as _date, timedelta
+
+        years = st.selectbox("収集期間", [1, 2, 3, 4, 5], format_func=lambda x: f"{x}年分", key="bulk_years")
+
+        today = _date.today()
+        try:
+            start_date = _date(today.year - years, today.month, today.day)
+        except ValueError:
+            start_date = _date(today.year - years, today.month, 28)
+
+        weekend_dates = []
+        d = start_date
+        while d <= today:
+            if d.weekday() in (5, 6):
+                weekend_dates.append(d)
+            d += timedelta(days=1)
+
+        st.info(
+            f"対象期間: {start_date} 〜 {today}  /  "
+            f"土日: {len(weekend_dates)} 日（最大約 {len(weekend_dates) * 12} レース）"
+        )
+
+        if st.button("一括収集開始", key="btn_bulk"):
+            from data.scraper import JRAScraper
+            from data.database import init_db, Race
+            session = init_db()
+            scraper = JRAScraper(session)
+
+            total_saved = 0
+            total_failed = 0
+            total_skipped = 0
+
+            date_progress = st.progress(0)
+            status_text = st.empty()
+            result_text = st.empty()
+
+            for i, target in enumerate(weekend_dates):
+                status_text.text(f"[{i+1}/{len(weekend_dates)}] {target} を処理中...")
+
+                race_ids = scraper.get_race_ids_by_date(target)
+
+                for race_id in race_ids:
+                    if session.query(Race).filter_by(id=race_id).first():
+                        total_skipped += 1
+                        continue
+                    data = scraper.scrape_race_results(race_id)
+                    if data:
+                        scraper.save_to_db(data)
+                        total_saved += 1
+                    else:
+                        total_failed += 1
+
+                date_progress.progress((i + 1) / len(weekend_dates))
+                result_text.text(
+                    f"保存済み: {total_saved} レース / スキップ(取得済み): {total_skipped} / 失敗: {total_failed} 件"
+                )
+
+            status_text.text("完了")
+            st.success(f"一括収集完了: {total_saved} レース保存 / スキップ: {total_skipped} / 失敗: {total_failed} 件")
+
 elif option == "分析・予測":
     st.header("ベイズ推定モデル")
     st.write("Stanモデルを用いて予測を行います。")
@@ -110,9 +173,10 @@ elif option == "分析・予測":
                     if entry:
                         horse_name = entry.horse.name if entry.horse else r.horse_id
                         data.append({
-                            'rank':     r.rank,
-                            'jockey':   entry.jockey,
-                            'horse_id': horse_name,
+                            'rank':        r.rank,
+                            'jockey':      entry.jockey_id or entry.jockey,
+                            'jockey_name': entry.jockey,
+                            'horse_id':    horse_name,
                         })
 
                 if not data:
@@ -142,10 +206,11 @@ elif option == "分析・予測":
             id_to_jockey = {v: k for k, v in predictor.jockey_map.items()
                             if k != predictor.UNKNOWN}
             beta_j_rows = []
-            for i, name in id_to_jockey.items():
+            for i, key in id_to_jockey.items():
                 param = f'beta_j[{i}]'
                 if param in summary.index:
                     row = summary.loc[param]
+                    name = predictor.jockey_display_map.get(key, key)
                     beta_j_rows.append({
                         '騎手':    name,
                         '能力値':  round(row['Mean'], 3),
@@ -206,11 +271,19 @@ elif option == "分析・予測":
             )
 
             if st.button("予測実行"):
-                valid_entries = [
-                    {'jockey': row['騎手'].strip(), 'horse': row['馬名'].strip()}
-                    for _, row in entry_df.iterrows()
-                    if row['騎手'].strip() and row['馬名'].strip()
-                ]
+                from data.database import Jockey as JockeyModel
+                _session = init_db()
+                valid_entries = []
+                for _, row in entry_df.iterrows():
+                    jockey_input = row['騎手'].strip()
+                    horse_input  = row['馬名'].strip()
+                    if jockey_input and horse_input:
+                        jrec = _session.query(JockeyModel).filter(JockeyModel.name == jockey_input).first()
+                        valid_entries.append({
+                            'jockey':          jrec.id if jrec else jockey_input,
+                            'horse':           horse_input,
+                            '_display_jockey': jockey_input,
+                        })
                 if not valid_entries:
                     st.warning("騎手名と馬名を入力してください。")
                 else:
@@ -230,7 +303,7 @@ elif option == "分析・予測":
                         else:
                             status = '⚠ 馬不明'
                         rows.append({
-                            '騎手':        e['jockey'],
+                            '騎手':        e['_display_jockey'],
                             '馬名':        e['horse'],
                             'データ確認':  status,
                             '勝率 (%)':    round(float(pw) * 100, 1),
@@ -321,14 +394,17 @@ elif option == "今日のレース予測":
         known_jockeys = set(predictor.known_jockeys())
         known_horses  = set(predictor.known_horses())
 
-        pred_input = [{'jockey': e['jockey'], 'horse': e['horse_name']} for e in entries]
+        pred_input = [
+            {'jockey': e.get('jockey_id') or e['jockey'], 'horse': e['horse_name']}
+            for e in entries
+        ]
 
         with st.spinner("予測計算中..."):
             prob_win, prob_top3 = predictor.predict(pred_input)
 
         rows = []
-        for e, pw, pt in zip(entries, prob_win, prob_top3):
-            j_ok = e['jockey']     in known_jockeys
+        for e, pi, pw, pt in zip(entries, pred_input, prob_win, prob_top3):
+            j_ok = pi['jockey']    in known_jockeys
             h_ok = e['horse_name'] in known_horses
             if   j_ok and h_ok:        status = '✓'
             elif not j_ok and not h_ok: status = '⚠ 両方不明'
