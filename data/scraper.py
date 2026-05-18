@@ -31,14 +31,27 @@ class JRAScraper:
 
     def __init__(self, db_session):
         self.session = db_session
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
+        self.http = requests.Session()
+        self.http.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
+        })
+        self._cookie_initialized = False
 
-    def fetch_page(self, url, encoding='EUC-JP'):
+    def _ensure_cookies(self):
+        if not self._cookie_initialized:
+            try:
+                self.http.get('https://race.netkeiba.com/', timeout=10)
+                self._cookie_initialized = True
+            except Exception:
+                pass
+
+    def fetch_page(self, url, encoding='EUC-JP', referer: str = None):
         time.sleep(1)
         try:
-            response = requests.get(url, headers=self.headers, timeout=15)
+            headers = {'Referer': referer} if referer else {}
+            response = self.http.get(url, headers=headers, timeout=15)
             response.raise_for_status()
             response.encoding = encoding
             return BeautifulSoup(response.text, 'html.parser')
@@ -53,7 +66,7 @@ class JRAScraper:
         """
         date_str = target_date.strftime('%Y%m%d')
         url = f"{self.DB_BASE}/race/list/{date_str}/"
-        soup = self.fetch_page(url, encoding='EUC-JP')
+        soup = self.fetch_page(url, encoding='EUC-JP', referer=self.DB_BASE)
         if not soup:
             return []
 
@@ -72,9 +85,10 @@ class JRAScraper:
         """当日・翌日など結果未確定日のJRAレースID一覧を取得する。
         race_list_sub.html は静的HTMLで返るため当日レースにも対応。
         """
+        self._ensure_cookies()
         date_str = target_date.strftime('%Y%m%d')
         url = f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date_str}"
-        soup = self.fetch_page(url, encoding='EUC-JP')
+        soup = self.fetch_page(url, encoding='EUC-JP', referer='https://race.netkeiba.com/')
         if not soup:
             return []
 
@@ -88,26 +102,68 @@ class JRAScraper:
                     race_ids.append(race_id)
         return sorted(race_ids)
 
+    def _find_entry_table(self, soup) -> object:
+        """ページ内の出走馬テーブルを探す（クラス名に依存しない）"""
+        # クラス名で検索
+        table = (
+            soup.select_one('table.Shutuba_Table') or
+            soup.select_one('table[class*="Shutuba"]') or
+            soup.select_one('table[class*="shutuba"]') or
+            soup.select_one('table[class*="RaceCard"]') or
+            soup.select_one('table[class*="race_card"]')
+        )
+        if table:
+            return table
+        # ヒューリスティック: 行数>=8 かつ先頭データセルが枠番(1桁数字)のテーブル
+        for t in soup.find_all('table'):
+            data_rows = [r for r in t.find_all('tr') if r.find('td')]
+            if len(data_rows) < 6:
+                continue
+            first_td = data_rows[0].find('td')
+            if first_td and re.match(r'^\d$', first_td.get_text(strip=True)):
+                return t
+        return None
+
     def scrape_shutuba(self, race_id: str) -> dict:
         """出馬表をスクレイピングしてレース情報と出走馬リストを返す。
         results が未確定の当日レースにも対応。
         """
-        url = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
-        soup = self.fetch_page(url, encoding='EUC-JP')
+        self._ensure_cookies()
+
+        # ① メインサイト (EUC-JP)
+        url_main = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}&rf=race_list"
+        soup = self.fetch_page(url_main, encoding='EUC-JP',
+                               referer='https://race.netkeiba.com/top/race_list_sub.html')
+        table = self._find_entry_table(soup) if soup else None
+
+        # ② サブページ (JS非依存の静的版)
+        if not table:
+            url_sub = f"https://race.netkeiba.com/race/shutuba_sub.html?race_id={race_id}"
+            soup2 = self.fetch_page(url_sub, encoding='EUC-JP',
+                                    referer='https://race.netkeiba.com/top/race_list_sub.html')
+            table2 = self._find_entry_table(soup2) if soup2 else None
+            if table2:
+                soup, table = soup2, table2
+
+        # ③ モバイル版 (sp.netkeiba.com / UTF-8 / SSR)
+        if not table:
+            url_sp = f"https://sp.netkeiba.com/race/card.html?race_id={race_id}"
+            soup3 = self.fetch_page(url_sp, encoding='utf-8',
+                                    referer='https://sp.netkeiba.com/')
+            table3 = self._find_entry_table(soup3) if soup3 else None
+            if table3:
+                soup, table = soup3, table3
+                print(f"[shutuba] モバイル版で取得成功")
+
         if not soup:
-            return {}
+            return {'_error': 'ページ取得失敗'}
 
         # レース名
-        race_name_elem = soup.select_one('h1.RaceName') or soup.select_one('.RaceName')
+        race_name_elem = soup.select_one('h1.RaceName') or soup.select_one('.RaceName') or soup.find('h1')
         race_name = race_name_elem.get_text(strip=True) if race_name_elem else f"Race {race_id}"
 
         # コース・距離・天候など
-        details_text = ""
-        for sel in ['.RaceData01', '.RaceData02', 'div[class*=RaceData]']:
-            elem = soup.select_one(sel)
-            if elem:
-                details_text += " " + elem.get_text()
-
+        details_text = soup.get_text()
         course_type, distance = "Unknown", 0
         m = re.search(r'(芝|ダート|ダ|障害|障)(\d+)m', details_text)
         if m:
@@ -124,13 +180,31 @@ class JRAScraper:
         location = PLACE_CODES.get(place_code, f"場所{place_code}")
         race_num = int(race_id[10:12])
 
-        # 出走馬テーブル (table.Shutuba_Table)
-        table = soup.select_one('table.Shutuba_Table')
         if not table:
-            return {}
+            all_tables = [t.get('class') for t in soup.find_all('table')]
+            page_title = soup.title.string.strip() if soup.title else 'N/A'
+            # HTMLの先頭500文字をデバッグ出力
+            print(f"[shutuba] テーブル未検出 race_id={race_id}")
+            print(f"[shutuba] ページタイトル: {page_title}")
+            print(f"[shutuba] 検出テーブル: {all_tables[:8]}")
+            print(f"[shutuba] HTML先頭: {str(soup)[:500]}")
+            not_published = any(kw in details_text for kw in ['出馬表はまだ', '公開されていません', '発表前', '登録受付'])
+            error_msg = '出馬表はまだ公開されていません（通常レース3〜4日前に公開）' if not_published else '出馬表テーブルが見つかりません'
+            return {
+                '_error': error_msg,
+                '_page_title': page_title,
+                '_tables': all_tables[:8],
+            }
+
+        all_rows = table.find_all('tr')
+        print(f"[shutuba] テーブル検出: {table.get('class')}, 行数={len(all_rows)}")
+        # 最初の3行の列数と先頭セルを確認
+        for dbg_row in all_rows[:3]:
+            dbg_cols = dbg_row.find_all('td')
+            print(f"[shutuba]   cols={len(dbg_cols)}, first={[c.get_text(strip=True)[:10] for c in dbg_cols[:4]]}")
 
         entries = []
-        for row in table.find_all('tr'):
+        for row in all_rows:
             cols = row.find_all('td')
             if len(cols) < 7:
                 continue

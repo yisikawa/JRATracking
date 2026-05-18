@@ -158,6 +158,14 @@ elif option == "分析・予測":
         st.session_state.predictor = None
         st.session_state.predictor_summary = None
 
+    train_mode = st.radio(
+        "学習モード",
+        ['高速 (ADVI)', '標準 (MCMC)', '精密 (MCMC)'],
+        horizontal=True,
+        help='高速: 数秒〜数分・近似解  /  標準: 数分・chains=2  /  精密: 10分以上・chains=4',
+    )
+    mode_map = {'高速 (ADVI)': 'advi', '標準 (MCMC)': 'fast', '精密 (MCMC)': 'standard'}
+
     if st.button("モデル学習 (データ更新)"):
         with st.spinner("データ取得・学習中..."):
             session = init_db()
@@ -184,7 +192,7 @@ elif option == "分析・予測":
                 else:
                     df = pd.DataFrame(data)
                     predictor = JRAPredictor()
-                    summary = predictor.train(df)
+                    summary = predictor.train(df, mode=mode_map[train_mode])
                     st.session_state.predictor = predictor
                     st.session_state.predictor_summary = summary
                     st.success(
@@ -205,20 +213,20 @@ elif option == "分析・予測":
 
             id_to_jockey = {v: k for k, v in predictor.jockey_map.items()
                             if k != predictor.UNKNOWN}
+            is_advi = predictor.fit_mode == 'advi'
             beta_j_rows = []
             for i, key in id_to_jockey.items():
                 param = f'beta_j[{i}]'
                 if param in summary.index:
                     row = summary.loc[param]
                     name = predictor.jockey_display_map.get(key, key)
-                    beta_j_rows.append({
-                        '騎手':    name,
-                        '能力値':  round(row['Mean'], 3),
-                        '標準偏差': round(row['StdDev'], 3),
-                        '5%':     round(row['5%'], 3),
-                        '95%':    round(row['95%'], 3),
-                        'R_hat':  round(row['R_hat'], 3),
-                    })
+                    entry = {'騎手': name, '能力値': round(row['Mean'], 3)}
+                    if not is_advi:
+                        entry.update({'標準偏差': round(row['StdDev'], 3),
+                                      '5%': round(row['5%'], 3),
+                                      '95%': round(row['95%'], 3),
+                                      'R_hat': round(row['R_hat'], 3)})
+                    beta_j_rows.append(entry)
             if beta_j_rows:
                 jdf = pd.DataFrame(beta_j_rows).set_index('騎手').sort_values('能力値', ascending=False)
                 st.dataframe(jdf, use_container_width=True)
@@ -236,14 +244,13 @@ elif option == "分析・予測":
                 param = f'beta_h[{i}]'
                 if param in summary.index:
                     row = summary.loc[param]
-                    beta_h_rows.append({
-                        '馬名':    name,
-                        '能力値':  round(row['Mean'], 3),
-                        '標準偏差': round(row['StdDev'], 3),
-                        '5%':     round(row['5%'], 3),
-                        '95%':    round(row['95%'], 3),
-                        'R_hat':  round(row['R_hat'], 3),
-                    })
+                    entry = {'馬名': name, '能力値': round(row['Mean'], 3)}
+                    if not is_advi:
+                        entry.update({'標準偏差': round(row['StdDev'], 3),
+                                      '5%': round(row['5%'], 3),
+                                      '95%': round(row['95%'], 3),
+                                      'R_hat': round(row['R_hat'], 3)})
+                    beta_h_rows.append(entry)
             if beta_h_rows:
                 hdf = pd.DataFrame(beta_h_rows).set_index('馬名').sort_values('能力値', ascending=False)
                 st.dataframe(hdf, use_container_width=True)
@@ -377,7 +384,72 @@ elif option == "今日のレース予測":
             shutuba = st.session_state.shutuba_cache[selected_id]
 
         if not shutuba or not shutuba.get('entries'):
-            st.error("出馬表の取得に失敗しました。レースIDを確認してください。")
+            st.warning(
+                "出馬表の自動取得ができませんでした。"
+                "出馬表がまだ公開されていない場合は、以下に馬名と騎手名を入力して予測できます。"
+            )
+
+            from data.database import Jockey as JockeyModel
+            manual_df = st.data_editor(
+                pd.DataFrame({'馬名': [''] * 16, '騎手': [''] * 16}),
+                num_rows='dynamic',
+                use_container_width=True,
+                column_config={
+                    '馬名': st.column_config.TextColumn('馬名', width='medium'),
+                    '騎手': st.column_config.TextColumn('騎手名', width='medium'),
+                },
+                key='manual_shutuba_editor',
+            )
+
+            if st.button('予測実行', key='btn_manual_today'):
+                _sess = init_db()
+                manual_entries = []
+                for i, row in manual_df.iterrows():
+                    horse = row['馬名'].strip()
+                    jname = row['騎手'].strip()
+                    if horse and jname:
+                        jrec = _sess.query(JockeyModel).filter(JockeyModel.name == jname).first()
+                        manual_entries.append({
+                            'horse_name':      horse,
+                            'jockey':          jrec.id if jrec else jname,
+                            '_display_jockey': jname,
+                            'horse_number':    i + 1,
+                        })
+
+                if not manual_entries:
+                    st.warning('馬名と騎手名を入力してください。')
+                else:
+                    pred_input = [{'jockey': e['jockey'], 'horse': e['horse_name']} for e in manual_entries]
+                    with st.spinner('予測計算中...'):
+                        prob_win, prob_top3 = predictor.predict(pred_input)
+
+                    rows = []
+                    for e, pi, pw, pt in zip(manual_entries, pred_input, prob_win, prob_top3):
+                        j_ok = pi['jockey']    in known_jockeys
+                        h_ok = e['horse_name'] in known_horses
+                        if   j_ok and h_ok:         status = '✓'
+                        elif not j_ok and not h_ok: status = '⚠ 両方不明'
+                        elif not j_ok:              status = '⚠ 騎手不明'
+                        else:                       status = '⚠ 馬不明'
+                        rows.append({
+                            '馬番':        e['horse_number'],
+                            '馬名':        e['horse_name'],
+                            '騎手':        e['_display_jockey'],
+                            'データ確認':  status,
+                            '勝率 (%)':    round(float(pw) * 100, 1),
+                            '3着内率 (%)': round(float(pt) * 100, 1),
+                        })
+
+                    result_df = pd.DataFrame(rows).sort_values('勝率 (%)', ascending=False).reset_index(drop=True)
+                    st.dataframe(result_df, use_container_width=True)
+
+                    unknown_count = sum(1 for r in rows if '不明' in r['データ確認'])
+                    if unknown_count:
+                        st.caption(
+                            f"⚠ {unknown_count} 頭の騎手または馬が学習データに含まれていません。"
+                            " より多くのレースデータを収集してから再学習すると精度が上がります。"
+                        )
+
             st.stop()
 
         entries = shutuba['entries']
