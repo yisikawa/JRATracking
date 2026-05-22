@@ -1,15 +1,19 @@
 @echo off
-chcp 65001 > nul
 setlocal
-
-echo [JRA Tracking App] 起動中...
-echo.
 
 cd /d %~dp0
 call venv\Scripts\activate
 
-echo Streamlitを起動しています (ポート 8501)...
-echo アプリケーションを終了するには Ctrl+C を押してください...
-echo.
+start "JRA Backend" cmd /k "cd /d %~dp0 && call venv\Scripts\activate && uvicorn backend.main:app --port 8000 --reload"
 
-streamlit run main.py
+timeout /t 2 /nobreak > nul
+
+start "JRA Frontend" cmd /k "cd /d %~dp0\frontend && npm run dev"
+
+echo.
+echo ========================================
+echo  JRA Tracking App started
+echo  Open http://localhost:5151
+echo ========================================
+echo.
+pause

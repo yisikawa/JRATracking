@@ -26,3 +26,11 @@ stan/
 *.csv
 *.png
 *.webp
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Misc
+*.db-journal
+package-lock.json
