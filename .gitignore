@@ -34,3 +34,6 @@ frontend/dist/
 # Misc
 *.db-journal
 package-lock.json
+
+# 学習済みモデル (生成物のため除外)
+*.pkl
