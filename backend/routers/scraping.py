@@ -27,8 +27,8 @@ class RaceScrapeRequest(BaseModel):
 
 
 @router.get("/by-date")
-def get_races_by_date(date: str):
-    target = date.fromisoformat(date)
+def get_races_by_date(date_str: str):
+    target = date.fromisoformat(date_str)
     session = _get_db()
     scraper = JRAScraper(session)
     race_ids = scraper.get_race_ids_by_date(target)
@@ -111,8 +111,8 @@ async def bulk_stream(years: int = 1):
 
 
 @router.get("/upcoming")
-def get_upcoming(date: str):
-    target = date.fromisoformat(date) if date else date.today()
+def get_upcoming(date_str: str):
+    target = date.fromisoformat(date_str) if date_str else date.today()
     session = _get_db()
     scraper = JRAScraper(session)
     race_ids = scraper.get_upcoming_race_ids(target)

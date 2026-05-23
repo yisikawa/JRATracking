@@ -98,23 +98,23 @@ export default function TodaysPrediction() {
       <h2 className="page-title">今日のレース予測</h2>
       <div className="card">
         <div className="card-title">レース選択</div>
-        <div className="flex gap-2 items-center" style={{ marginBottom: 14 }}>
+        <div className="flex gap-2 items-center flex-wrap flex-col-sp" style={{ marginBottom: 14 }}>
           <input type="date" className="form-input" style={{ maxWidth: 180 }}
             value={fetchDate} onChange={(e) => setFetchDate(e.target.value)} />
-          <button className="btn btn-ghost" onClick={handleGetRaces} disabled={loading}>
+          <button className="btn btn-ghost btn-block" onClick={handleGetRaces} disabled={loading}>
             {loading ? <><span className="spinner" /> 取得中...</> : "レース一覧を取得"}
           </button>
         </div>
 
         {raceIds.length > 0 && (
-          <div className="flex gap-2 items-center">
+          <div className="flex gap-2 items-center flex-wrap flex-col-sp">
             <select className="form-select" style={{ maxWidth: 280 }}
               value={selectedId} onChange={(e) => setSelectedId(e.target.value)}>
               {raceIds.map((id) => (
                 <option key={id} value={id}>{raceLabel(id)}</option>
               ))}
             </select>
-            <button className="btn btn-primary" onClick={handlePredict} disabled={predicting}>
+            <button className="btn btn-primary btn-block" onClick={handlePredict} disabled={predicting}>
               {predicting ? <><span className="spinner" /> 予測中...</> : "出馬表取得 → 予測実行"}
             </button>
           </div>

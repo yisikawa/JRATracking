@@ -121,7 +121,7 @@ export default function DataCollection() {
               value={dateVal} onChange={(e) => setDateVal(e.target.value)} />
           </div>
           {dateMsg && renderMsg(dateMsg)}
-          <button className="btn btn-primary" onClick={handleByDate} disabled={dateLoading || !dateVal}>
+          <button className="btn btn-primary btn-block" onClick={handleByDate} disabled={dateLoading || !dateVal}>
             {dateLoading ? <><span className="spinner" /> 取得中...</> : "一覧取得 → 全レース保存"}
           </button>
         </div>

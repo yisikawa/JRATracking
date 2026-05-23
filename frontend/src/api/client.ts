@@ -15,7 +15,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 // --- Scraping ---
 export const scrapeApi = {
   byDate: (date: string) =>
-    request<{ race_ids: string[] }>(`/scrape/by-date?date=${date}`),
+    request<{ race_ids: string[] }>(`/scrape/by-date?date_str=${date}`),
 
   scrapeRace: (race_id: string) =>
     request<{ success: boolean; race_name?: string; location?: string }>(
@@ -24,7 +24,7 @@ export const scrapeApi = {
     ),
 
   upcoming: (date: string) =>
-    request<{ race_ids: string[] }>(`/scrape/upcoming?date=${date}`),
+    request<{ race_ids: string[] }>(`/scrape/upcoming?date_str=${date}`),
 
   shutuba: (race_id: string) =>
     request<Record<string, unknown>>(`/scrape/shutuba/${race_id}`),
