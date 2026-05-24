@@ -10,11 +10,17 @@ from backend.routers import scraping, model, db_router
 
 app = FastAPI(title="JRA Tracking API")
 
+ALLOWED_ORIGINS = [
+    "http://192.168.111.10:5151",
+    "http://localhost:5151",
+    "http://127.0.0.1:5151",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type"],
 )
 
 app.include_router(scraping.router, prefix="/api/scrape", tags=["scraping"])
