@@ -51,6 +51,15 @@
 
 ---
 
+## テスト実行（開発者向け）
+
+```bat
+venv\Scripts\pip install -r requirements-dev.txt
+venv\Scripts\python -m pytest tests -v
+```
+
+---
+
 ## インストール手順
 
 ### 1. 仮想環境の作成とバックエンド依存ライブラリのインストール
@@ -123,6 +132,9 @@ http://<このPCのIPアドレス>:5151
 
 学習完了後、騎手・馬のランキングが表示されます。モデルはファイル保存されるため再起動後も維持されます。
 
+> **旧バージョンからの移行:** v0.2 以降、馬は馬名ではなく netkeiba の馬IDで学習します。
+> 旧バージョンで学習した `jra_model.pkl` は予測時に馬が「不明」扱いになるため、**再学習してください**。
+
 ### 3. 勝率予測（手動入力）
 
 「分析・予測」→「勝率予測」タブで騎手名・馬名を入力して「予測実行」をクリックします。
@@ -141,6 +153,7 @@ http://<このPCのIPアドレス>:5151
 JRATracking/
 ├── backend/
 │   ├── main.py              # FastAPI アプリ・起動エントリーポイント
+│   ├── deps.py              # DBセッション依存性 (Depends)
 │   └── routers/
 │       ├── scraping.py      # スクレイピング API (/api/scrape/*)
 │       ├── model.py         # 学習・予測 API (/api/model/*)
@@ -164,9 +177,11 @@ JRATracking/
 │   └── database.py          # SQLAlchemy モデル定義・DB初期化
 ├── analysis/
 │   └── predictor.py         # NumPyro ベイズモデル・学習・予測
+├── tests/                   # pytest テスト
 ├── jra_data.db              # SQLite データベース
 ├── jra_model.pkl            # 学習済みモデル（学習後に自動生成）
 ├── requirements.txt         # Python 依存ライブラリ
+├── requirements-dev.txt     # 開発用依存（pytest など）
 └── start.bat                # アプリ起動スクリプト
 ```
 
@@ -185,13 +200,15 @@ JRATracking/
 | POST | `/api/model/train/start?mode=advi\|fast\|standard` | 学習開始 |
 | GET | `/api/model/train/stream/{task_id}` | 学習進捗（SSEストリーム） |
 | GET | `/api/model/rankings` | 騎手・馬ランキング取得 |
-| POST | `/api/model/predict` | 勝率予測 |
+| POST | `/api/model/predict?normalize=true\|false` | 勝率予測（normalize=true でレース内合計100%に正規化） |
 | GET | `/api/db/stats` | DB統計（件数） |
 | GET | `/api/db/{table}` | テーブルデータ取得 |
 | DELETE | `/api/db/race/{race_id}` | レース削除（関連データ含む） |
 | GET | `/api/db/{table}/export` | CSV ダウンロード |
 | POST | `/api/db/{table}/import` | CSV インポート |
 | DELETE | `/api/db/reset` | DB全初期化 |
+
+> 学習実行中に再度 `/api/model/train/start` を呼ぶと **409** が返ります。
 
 ---
 
@@ -221,3 +238,5 @@ YYYY CC KK DD NN
 - サイト構造の変更によりスクレイピングが機能しなくなる場合があります。
 - 一括収集の目安: 1年分 ≒ 20〜30分（ネットワーク環境による）。
 - Windowsファイアウォールで **ポート 5151・8000** を開放しないと、LAN内の他PCからアクセスできません。
+- 学習済みモデル `jra_model.pkl` が破損している場合でも、起動時にクラッシュせず未学習状態で起動します（「分析・予測」から再学習してください）。
+- `race.netkeiba.com`（出馬表取得元）は現在 UTF-8 でHTMLを配信しています。サイト側のエンコーディングが変わった場合は文字化けやエラーの原因になるため注意してください。

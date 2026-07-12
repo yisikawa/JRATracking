@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, Date, ForeignKey, UniqueConstraint, text, inspect as sa_inspect
+from sqlalchemy import create_engine, Column, Integer, String, Float, Date, ForeignKey, UniqueConstraint, Index, text, inspect as sa_inspect
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 Base = declarative_base()
@@ -61,7 +61,10 @@ class Entry(Base):
     horse = relationship("Horse", back_populates="entries")
     jockey_obj = relationship('Jockey', back_populates='entries')
 
-    __table_args__ = (UniqueConstraint('race_id', 'horse_id', name='_race_horse_uc'),)
+    __table_args__ = (
+        UniqueConstraint('race_id', 'horse_id', name='_race_horse_uc'),
+        Index('ix_entries_race_horse', 'race_id', 'horse_id'),
+    )
 
 
 class Result(Base):
@@ -78,12 +81,7 @@ class Result(Base):
     race = relationship("Race", back_populates="results")
     horse = relationship("Horse", back_populates="results")
 
-
-def init_db(db_path='sqlite:///jra_data.db'):
-    engine = create_engine(db_path)
-    Base.metadata.create_all(engine)
-    _migrate(engine)
-    return sessionmaker(bind=engine)()
+    __table_args__ = (Index('ix_results_race_horse', 'race_id', 'horse_id'),)
 
 
 def _migrate(engine):
@@ -101,3 +99,26 @@ def _migrate(engine):
         if 'jockey_id' not in entry_cols:
             conn.execute(text('ALTER TABLE entries ADD COLUMN jockey_id VARCHAR'))
             conn.commit()
+
+        # 既存DB向け: 重複チェック高速化のためのインデックス
+        conn.execute(text('CREATE INDEX IF NOT EXISTS ix_results_race_horse ON results (race_id, horse_id)'))
+        conn.execute(text('CREATE INDEX IF NOT EXISTS ix_entries_race_horse ON entries (race_id, horse_id)'))
+        conn.commit()
+
+
+_factories = {}
+
+
+def get_session_factory(db_path='sqlite:///jra_data.db'):
+    """DBパスごとにエンジン+sessionmakerを1度だけ生成してキャッシュする"""
+    if db_path not in _factories:
+        engine = create_engine(db_path, connect_args={"check_same_thread": False})
+        Base.metadata.create_all(engine)
+        _migrate(engine)
+        _factories[db_path] = sessionmaker(bind=engine)
+    return _factories[db_path]
+
+
+def init_db(db_path='sqlite:///jra_data.db'):
+    """互換用: 新しいセッションを返す（エンジンは共有）"""
+    return get_session_factory(db_path)()

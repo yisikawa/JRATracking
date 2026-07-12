@@ -25,6 +25,7 @@ export default function Analysis() {
   const [entries, setEntries] = useState<EntryRow[]>(Array(6).fill({ jockey: "", horse: "" }).map(() => ({ jockey: "", horse: "" })));
   const [predicting, setPredicting] = useState(false);
   const [predResults, setPredResults] = useState<PredictResult[] | null>(null);
+  const [predMsg, setPredMsg] = useState("");
 
   useEffect(() => {
     modelApi.status().then((s) => setModelTrained(s.trained)).catch(() => {});
@@ -50,6 +51,9 @@ export default function Analysis() {
         }
       };
       es.onerror = () => { es.close(); setTraining(false); setTrainMsg("error:学習中にエラーが発生しました"); };
+    }).catch((e: unknown) => {
+      setTrainMsg(`error:${e instanceof Error ? e.message : String(e)}`);
+      setTraining(false);
     });
   };
 
@@ -72,9 +76,12 @@ export default function Analysis() {
     if (!valid.length) return;
     setPredicting(true);
     setPredResults(null);
+    setPredMsg("");
     try {
       const results = await modelApi.predict(valid);
       setPredResults(results);
+    } catch (e: unknown) {
+      setPredMsg(`error:${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setPredicting(false);
     }
@@ -190,6 +197,7 @@ export default function Analysis() {
                   {predicting ? <><span className="spinner" /> 予測中...</> : "予測実行"}
                 </button>
               </div>
+              {predMsg && renderMsg(predMsg)}
               {predResults && (
                 <div className="table-wrap">
                   <table className="data-table">

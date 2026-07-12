@@ -88,7 +88,7 @@ class JRAScraper:
         self._ensure_cookies()
         date_str = target_date.strftime('%Y%m%d')
         url = f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date_str}"
-        soup = self.fetch_page(url, encoding='EUC-JP', referer='https://race.netkeiba.com/')
+        soup = self.fetch_page(url, encoding='utf-8', referer='https://race.netkeiba.com/')
         if not soup:
             return []
 
@@ -130,16 +130,16 @@ class JRAScraper:
         """
         self._ensure_cookies()
 
-        # ① メインサイト (EUC-JP)
+        # ① メインサイト (UTF-8)
         url_main = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}&rf=race_list"
-        soup = self.fetch_page(url_main, encoding='EUC-JP',
+        soup = self.fetch_page(url_main, encoding='utf-8',
                                referer='https://race.netkeiba.com/top/race_list_sub.html')
         table = self._find_entry_table(soup) if soup else None
 
         # ② サブページ (JS非依存の静的版)
         if not table:
             url_sub = f"https://race.netkeiba.com/race/shutuba_sub.html?race_id={race_id}"
-            soup2 = self.fetch_page(url_sub, encoding='EUC-JP',
+            soup2 = self.fetch_page(url_sub, encoding='utf-8',
                                     referer='https://race.netkeiba.com/top/race_list_sub.html')
             table2 = self._find_entry_table(soup2) if soup2 else None
             if table2:
@@ -183,11 +183,9 @@ class JRAScraper:
         if not table:
             all_tables = [t.get('class') for t in soup.find_all('table')]
             page_title = soup.title.string.strip() if soup.title else 'N/A'
-            # HTMLの先頭500文字をデバッグ出力
-            print(f"[shutuba] テーブル未検出 race_id={race_id}")
-            print(f"[shutuba] ページタイトル: {page_title}")
-            print(f"[shutuba] 検出テーブル: {all_tables[:8]}")
-            print(f"[shutuba] HTML先頭: {str(soup)[:500]}")
+            # デバッグ情報にスクレイピング先の生テキストを含めない
+            # (Windowsコンソールのcp932でエンコードできない文字が混入しクラッシュするため)
+            print(f"[shutuba] テーブル未検出 race_id={race_id}, 検出テーブル={all_tables[:8]}")
             not_published = any(kw in details_text for kw in ['出馬表はまだ', '公開されていません', '発表前', '登録受付'])
             error_msg = '出馬表はまだ公開されていません（通常レース3〜4日前に公開）' if not_published else '出馬表テーブルが見つかりません'
             return {
@@ -198,10 +196,6 @@ class JRAScraper:
 
         all_rows = table.find_all('tr')
         print(f"[shutuba] テーブル検出: {table.get('class')}, 行数={len(all_rows)}")
-        # 最初の3行の列数と先頭セルを確認
-        for dbg_row in all_rows[:3]:
-            dbg_cols = dbg_row.find_all('td')
-            print(f"[shutuba]   cols={len(dbg_cols)}, first={[c.get_text(strip=True)[:10] for c in dbg_cols[:4]]}")
 
         entries = []
         for row in all_rows:
@@ -290,7 +284,13 @@ class JRAScraper:
             return None
 
         try:
-            race_name_elem = soup.select_one('h1')
+            # サイト共通ヘッダーのロゴにも<h1>があり文書内先頭に来るため、
+            # レース詳細ブロック(dl.racedata)内のh1を優先し、
+            # 見つからない場合はテキストを持つ最初のh1にフォールバックする
+            race_name_elem = (
+                soup.select_one('dl.racedata h1') or
+                next((h for h in soup.find_all('h1') if h.get_text(strip=True)), None)
+            )
             race_name = race_name_elem.get_text(strip=True) if race_name_elem else f"Race {race_id}"
 
             # ページ全体からレース詳細テキストを収集
@@ -440,10 +440,13 @@ class JRAScraper:
             return None
 
     def _parse_time(self, time_str: str):
-        """'1:34.5' を秒数(94.5)に変換する"""
+        """'1:34.5' → 94.5、'58.3' → 58.3 のように秒数に変換する"""
         m = re.match(r'(\d+):(\d+)\.(\d+)', time_str)
         if m:
             return int(m.group(1)) * 60 + int(m.group(2)) + int(m.group(3)) / 10
+        m = re.match(r'^\d+\.\d+$', time_str)
+        if m:
+            return float(time_str)
         return None
 
     def save_to_db(self, parsed_data: dict):

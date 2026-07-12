@@ -11,8 +11,8 @@ function raceLabel(id: string) {
   return `${venue} ${parseInt(id.slice(10, 12))}R  (${id})`;
 }
 
-type PredictResult = { jockey: string; horse: string; win_pct: number; top3_pct: number; status: string };
-type ShutItem = { horse_name: string; jockey: string; jockey_id?: string; bracket_number: number; horse_number: number; sex?: string; age?: number; weight?: number; trainer?: string };
+type PredictResult = { jockey: string; jockey_name?: string; horse: string; horse_name?: string; win_pct: number; win_pct_norm?: number | null; top3_pct: number; status: string };
+type ShutItem = { horse_name: string; horse_id?: string; jockey: string; jockey_id?: string; bracket_number: number; horse_number: number; sex?: string; age?: number; weight?: number; trainer?: string };
 
 const STATUS_BADGE: Record<string, [string, string]> = {
   known:          ["badge-green",  "✓"],
@@ -50,6 +50,8 @@ export default function TodaysPrediction() {
       setRaceIds(race_ids);
       if (race_ids.length) setSelectedId(race_ids[0]);
       else setError("レースが見つかりません。開催がない日か、まだ公開されていない可能性があります。");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
@@ -73,10 +75,12 @@ export default function TodaysPrediction() {
 
       const input = entries.map((e) => ({
         jockey: e.jockey_id ?? e.jockey,
-        horse: e.horse_name,
+        horse: e.horse_id ?? e.horse_name,
       }));
-      const pred = await modelApi.predict(input);
+      const pred = await modelApi.predict(input, true);
       setResults(pred);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setPredicting(false);
     }
@@ -132,24 +136,25 @@ export default function TodaysPrediction() {
                 <tr>
                   <th>枠</th><th>馬番</th><th>馬名</th><th>性齢</th>
                   <th>斤量</th><th>騎手</th><th>調教師</th>
-                  <th>状態</th><th>勝率 (%)</th><th>3着内率 (%)</th>
+                  <th>状態</th><th>勝率 (%)</th><th>正規化勝率 (%)</th><th>3着内率 (%)</th>
                 </tr>
               </thead>
               <tbody>
                 {results.map((r, i) => {
-                  const s = shutuba.find((e) => e.horse_name === r.horse);
+                  const s = shutuba.find((e) => (e.horse_id ?? e.horse_name) === r.horse);
                   const [cls, label] = STATUS_BADGE[r.status] ?? ["badge-yellow", r.status];
                   return (
                     <tr key={i}>
                       <td>{s?.bracket_number ?? "—"}</td>
                       <td>{s?.horse_number ?? "—"}</td>
-                      <td><strong>{r.horse}</strong></td>
+                      <td><strong>{r.horse_name ?? r.horse}</strong></td>
                       <td>{s ? `${s.sex ?? ""}${s.age ?? ""}` : "—"}</td>
                       <td>{s?.weight ?? "—"}</td>
-                      <td>{r.jockey}</td>
+                      <td>{r.jockey_name ?? r.jockey}</td>
                       <td className="text-muted">{s?.trainer ?? "—"}</td>
                       <td><span className={`badge ${cls}`}>{label}</span></td>
                       <td><strong>{r.win_pct}</strong></td>
+                      <td><strong>{r.win_pct_norm ?? "—"}</strong></td>
                       <td>{r.top3_pct}</td>
                     </tr>
                   );

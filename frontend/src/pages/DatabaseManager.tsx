@@ -60,7 +60,8 @@ export default function DatabaseManager() {
     form.append("file", file);
     try {
       const res = await fetch(`/api/db/${importTable}/import`, { method: "POST", body: form });
-      const data = await res.json();
+      const data = (await res.json().catch(() => ({}))) as { count?: number; detail?: string };
+      if (!res.ok) throw new Error(data.detail ?? `HTTP ${res.status}`);
       setMsg(`success:${data.count} 件インポートしました。`);
       loadStats();
     } catch (e: unknown) {

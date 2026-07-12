@@ -1,25 +1,26 @@
 import asyncio
 import json
-import pathlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-from data.database import init_db, Race
+from backend.deps import get_db, DB_PATH
+from data.database import get_session_factory, Race
 from data.scraper import JRAScraper
-
-ROOT = pathlib.Path(__file__).parent.parent.parent
-DB_PATH = f"sqlite:///{ROOT / 'jra_data.db'}"
 
 router = APIRouter()
 _executor = ThreadPoolExecutor(max_workers=1)
 
 
-def _get_db():
-    return init_db(DB_PATH)
+def _parse_date(date_str: str) -> date:
+    try:
+        return date.fromisoformat(date_str)
+    except ValueError:
+        raise HTTPException(400, "日付は YYYY-MM-DD 形式で指定してください")
 
 
 class RaceScrapeRequest(BaseModel):
@@ -27,17 +28,15 @@ class RaceScrapeRequest(BaseModel):
 
 
 @router.get("/by-date")
-def get_races_by_date(date_str: str):
-    target = date.fromisoformat(date_str)
-    session = _get_db()
+def get_races_by_date(date_str: str, session: Session = Depends(get_db)):
+    target = _parse_date(date_str)
     scraper = JRAScraper(session)
     race_ids = scraper.get_race_ids_by_date(target)
     return {"race_ids": race_ids}
 
 
 @router.post("/race")
-def scrape_race(req: RaceScrapeRequest):
-    session = _get_db()
+def scrape_race(req: RaceScrapeRequest, session: Session = Depends(get_db)):
     scraper = JRAScraper(session)
     data = scraper.scrape_race_results(req.race_id)
     if data:
@@ -64,44 +63,49 @@ def _weekend_dates(years: int) -> list:
 
 @router.get("/bulk/stream")
 async def bulk_stream(years: int = 1):
+    # StreamingResponse のジェネレータ内では Depends のセッションが
+    # 先に close される可能性があるため、自前で生成・クローズする
     async def generate():
         loop = asyncio.get_event_loop()
-        session = _get_db()
-        scraper = JRAScraper(session)
-        dates = _weekend_dates(years)
-        total = len(dates)
-        saved = failed = skipped = 0
+        session = get_session_factory(DB_PATH)()
+        try:
+            scraper = JRAScraper(session)
+            dates = _weekend_dates(years)
+            total = len(dates)
+            saved = failed = skipped = 0
 
-        for i, d in enumerate(dates):
-            race_ids = await loop.run_in_executor(
-                _executor, scraper.get_race_ids_by_date, d
-            )
-            for race_id in race_ids:
-                if session.query(Race).filter_by(id=race_id).first():
-                    skipped += 1
-                    continue
-                data = await loop.run_in_executor(
-                    _executor, scraper.scrape_race_results, race_id
+            for i, d in enumerate(dates):
+                race_ids = await loop.run_in_executor(
+                    _executor, scraper.get_race_ids_by_date, d
                 )
-                if data:
-                    scraper.save_to_db(data)
-                    saved += 1
-                else:
-                    failed += 1
+                for race_id in race_ids:
+                    if session.query(Race).filter_by(id=race_id).first():
+                        skipped += 1
+                        continue
+                    data = await loop.run_in_executor(
+                        _executor, scraper.scrape_race_results, race_id
+                    )
+                    if data:
+                        scraper.save_to_db(data)
+                        saved += 1
+                    else:
+                        failed += 1
 
-            progress = round((i + 1) / total * 100, 1)
-            payload = {
-                "progress": progress,
-                "date": str(d),
-                "saved": saved,
-                "failed": failed,
-                "skipped": skipped,
-                "done": False,
-            }
-            yield f"data: {json.dumps(payload)}\n\n"
-            await asyncio.sleep(0)
+                progress = round((i + 1) / total * 100, 1)
+                payload = {
+                    "progress": progress,
+                    "date": str(d),
+                    "saved": saved,
+                    "failed": failed,
+                    "skipped": skipped,
+                    "done": False,
+                }
+                yield f"data: {json.dumps(payload)}\n\n"
+                await asyncio.sleep(0)
 
-        yield f"data: {json.dumps({'done': True, 'saved': saved, 'failed': failed, 'skipped': skipped})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'saved': saved, 'failed': failed, 'skipped': skipped})}\n\n"
+        finally:
+            session.close()
 
     return StreamingResponse(
         generate(),
@@ -111,18 +115,16 @@ async def bulk_stream(years: int = 1):
 
 
 @router.get("/upcoming")
-def get_upcoming(date_str: str):
-    target = date.fromisoformat(date_str) if date_str else date.today()
-    session = _get_db()
+def get_upcoming(date_str: str, session: Session = Depends(get_db)):
+    target = _parse_date(date_str) if date_str else date.today()
     scraper = JRAScraper(session)
     race_ids = scraper.get_upcoming_race_ids(target)
     return {"race_ids": race_ids}
 
 
 @router.get("/shutuba/{race_id}")
-async def get_shutuba(race_id: str):
+async def get_shutuba(race_id: str, session: Session = Depends(get_db)):
     loop = asyncio.get_event_loop()
-    session = _get_db()
     scraper = JRAScraper(session)
     result = await loop.run_in_executor(_executor, scraper.scrape_shutuba, race_id)
     return result

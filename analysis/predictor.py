@@ -27,8 +27,11 @@ class JRAPredictor:
         self.fit_result  = None
         self.fit_mode    = None   # 'advi' | 'fast' | 'standard'
         self.jockey_map  = {}     # name/id → 0-indexed int
-        self.horse_map   = {}
+        self.horse_map   = {}     # horse_id → 0-indexed int
         self.jockey_display_map = {}
+        self.horse_display_map  = {}   # horse_id → 馬名
+        self.horse_name_map     = {}   # 馬名 → horse_id
+        self.summary = None
 
     def prepare_data(self, df: pd.DataFrame) -> dict:
         unique_jockeys = list(df['jockey'].unique()) + [self.UNKNOWN]
@@ -38,6 +41,11 @@ class JRAPredictor:
 
         unique_horses = list(df['horse_id'].unique()) + [self.UNKNOWN]
         self.horse_map = {name: i for i, name in enumerate(unique_horses)}
+        if 'horse_name' in df.columns:
+            self.horse_display_map = dict(zip(df['horse_id'], df['horse_name']))
+            # 同名の馬が複数存在する場合、name→horse_idの逆引きは最後に処理された馬のhorse_idで上書きされる（後勝ち）。
+            # horse_id指定なら常に正確に解決できるため、この経路は名前だけで馬を指定した場合にのみ影響する。
+            self.horse_name_map = {name: hid for hid, name in self.horse_display_map.items()}
 
         unk_j = self.jockey_map[self.UNKNOWN]
         unk_h = self.horse_map[self.UNKNOWN]
@@ -73,7 +81,8 @@ class JRAPredictor:
             mcmc.run(rng_key, **data)
             self.fit_result = {'type': 'mcmc', 'samples': mcmc.get_samples()}
 
-        return self._build_summary()
+        self.summary = self._build_summary()
+        return self.summary
 
     def _build_summary(self) -> pd.DataFrame:
         rows = {}
@@ -115,6 +124,12 @@ class JRAPredictor:
 
         return pd.DataFrame(rows).T
 
+    def get_summary(self) -> pd.DataFrame:
+        """学習時に計算した summary を返す（旧pickle向けに遅延構築も可能）"""
+        if getattr(self, 'summary', None) is None:
+            self.summary = self._build_summary()
+        return self.summary
+
     def predict(self, race_entries: list) -> tuple:
         if self.fit_result is None:
             raise RuntimeError("モデルが学習されていません。train() を先に呼んでください。")
@@ -122,7 +137,8 @@ class JRAPredictor:
         unk_j = self.jockey_map[self.UNKNOWN]
         unk_h = self.horse_map[self.UNKNOWN]
         j_idx = np.array([self.jockey_map.get(e['jockey'], unk_j) for e in race_entries])
-        h_idx = np.array([self.horse_map.get(e['horse'],   unk_h) for e in race_entries])
+        resolved = [self.resolve_horse_key(e['horse']) for e in race_entries]
+        h_idx = np.array([self.horse_map[k] if k is not None else unk_h for k in resolved])
 
         if self.fit_result['type'] == 'advi':
             params     = self.fit_result['params']
@@ -149,3 +165,12 @@ class JRAPredictor:
 
     def known_horses(self) -> list:
         return [k for k in self.horse_map if k != self.UNKNOWN]
+
+    def resolve_horse_key(self, value: str):
+        """horse_id または馬名を horse_map のキーに解決する。未知なら None"""
+        if value in self.horse_map and value != self.UNKNOWN:
+            return value
+        hid = self.horse_name_map.get(value)
+        if hid in self.horse_map:
+            return hid
+        return None

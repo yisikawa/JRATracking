@@ -49,10 +49,22 @@ export const modelApi = {
       mode: string;
     }>("/model/rankings"),
 
-  predict: (entries: { jockey: string; horse: string }[]) =>
+  predict: (entries: { jockey: string; horse: string }[], normalize = false) =>
     request<
-      { jockey: string; horse: string; win_pct: number; top3_pct: number; status: string }[]
-    >("/model/predict", { method: "POST", body: JSON.stringify(entries) }),
+      {
+        jockey: string;
+        jockey_name?: string;
+        horse: string;
+        horse_name?: string;
+        win_pct: number;
+        win_pct_norm?: number | null;
+        top3_pct: number;
+        status: string;
+      }[]
+    >(`/model/predict?normalize=${normalize}`, {
+      method: "POST",
+      body: JSON.stringify(entries),
+    }),
 };
 
 // --- Database ---

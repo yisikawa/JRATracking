@@ -1,27 +1,20 @@
 import io
-import pathlib
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
 
-from data.database import init_db, Race, Horse, Entry, Result, Base
-
-ROOT = pathlib.Path(__file__).parent.parent.parent
-DB_PATH = f"sqlite:///{ROOT / 'jra_data.db'}"
+from backend.deps import get_db
+from data.database import Race, Horse, Entry, Result, Base
 
 router = APIRouter()
 
 MODEL_MAP = {"races": Race, "horses": Horse, "entries": Entry, "results": Result}
 
 
-def _get_db():
-    return init_db(DB_PATH)
-
-
 @router.get("/stats")
-def get_stats():
-    session = _get_db()
+def get_stats(session: Session = Depends(get_db)):
     return {
         "races":   session.query(Race).count(),
         "horses":  session.query(Horse).count(),
@@ -31,10 +24,9 @@ def get_stats():
 
 
 @router.get("/{table}")
-def get_table(table: str, limit: int = 500):
+def get_table(table: str, limit: int = 500, session: Session = Depends(get_db)):
     if table not in MODEL_MAP:
         raise HTTPException(404, f"テーブル '{table}' が見つかりません")
-    session = _get_db()
     model = MODEL_MAP[table]
     query = session.query(model)
     if table == "races":
@@ -47,9 +39,8 @@ def get_table(table: str, limit: int = 500):
 
 
 @router.delete("/race/{race_id}")
-def delete_race(race_id: str):
-    session = _get_db()
-    race = session.query(Race).get(race_id)
+def delete_race(race_id: str, session: Session = Depends(get_db)):
+    race = session.get(Race, race_id)
     if not race:
         raise HTTPException(404, "レースが見つかりません")
     try:
@@ -62,10 +53,9 @@ def delete_race(race_id: str):
 
 
 @router.get("/{table}/export")
-def export_csv(table: str):
+def export_csv(table: str, session: Session = Depends(get_db)):
     if table not in MODEL_MAP:
         raise HTTPException(404, f"テーブル '{table}' が見つかりません")
-    session = _get_db()
     items = session.query(MODEL_MAP[table]).all()
     if not items:
         raise HTTPException(404, "データがありません")
@@ -79,10 +69,9 @@ def export_csv(table: str):
 
 
 @router.post("/{table}/import")
-async def import_csv(table: str, file: UploadFile = File(...)):
+async def import_csv(table: str, file: UploadFile = File(...), session: Session = Depends(get_db)):
     if table not in MODEL_MAP:
         raise HTTPException(404, f"テーブル '{table}' が見つかりません")
-    session = _get_db()
     model = MODEL_MAP[table]
     content = await file.read()
     try:
@@ -102,8 +91,7 @@ async def import_csv(table: str, file: UploadFile = File(...)):
 
 
 @router.delete("/reset")
-def reset_db():
-    session = _get_db()
+def reset_db(session: Session = Depends(get_db)):
     try:
         engine = session.get_bind()
         Base.metadata.drop_all(engine)
